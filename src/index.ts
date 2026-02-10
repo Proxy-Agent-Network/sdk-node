@@ -23,101 +23,7 @@ export class InsufficientEscrowError extends ProxyError { name = 'InsufficientEs
 export class NodeRateLimitedError extends ProxyError { name = 'NodeRateLimitedError'; }
 export class ServerError extends ProxyError { name = 'ServerError'; }
 
-// --- 2. Resource Handlers ---
-
-export class MarketHandler {
-  constructor(private api: AxiosInstance, private client: ProxyClient) {}
-
-  /**
-   * Get real-time cost for human tasks.
-   */
-  public async getTicker(): Promise<MarketTicker> {
-    if (this.client.isTestMode) {
-      if (this.client.activeScenario === 'BROWNOUT_ACTIVE') {
-        return {
-          status: "congested",
-          base_currency: "SATS",
-          rates: { [TaskType.VERIFY_SMS_OTP]: 5000, [TaskType.LEGAL_NOTARY_SIGN]: 90000 },
-          congestion_multiplier: 5.0
-        };
-      }
-      return {
-        status: "stable",
-        base_currency: "SATS",
-        rates: { [TaskType.VERIFY_SMS_OTP]: 1000, [TaskType.LEGAL_NOTARY_SIGN]: 50000 },
-        congestion_multiplier: 1.0
-      };
-    }
-    const res = await this.api.get('/market/ticker');
-    return res.data;
-  }
-}
-
-export class TaskHandler {
-  constructor(private api: AxiosInstance, private client: ProxyClient) {}
-
-  /**
-   * Broadcast a new task to the Human Proxy network.
-   */
-  public async create(
-    taskType: TaskType | string, 
-    requirements: TaskRequirements, 
-    maxBudgetSats: number
-  ): Promise<TaskObject> {
-    if (this.client.isTestMode) {
-      // Simulation Logic
-      if (this.client.activeScenario === 'INSUFFICIENT_FUNDS') {
-        throw new InsufficientEscrowError("PX_200", "Insufficient Escrow Balance.", 402);
-      }
-      const mockId = `task_sim_${Date.now()}`;
-      this.client.mockTaskStore.set(mockId, Date.now());
-      return {
-        id: mockId,
-        status: 'matching',
-        created_at: new Date().toISOString(),
-        assigned_node_id: 'node_simulated_human_alpha'
-      };
-    }
-
-    // Real API Call
-    const payload = {
-      task_type: taskType,
-      requirements,
-      max_budget_sats: maxBudgetSats
-    };
-    const res = await this.api.post('/request', payload);
-    return res.data;
-  }
-
-  /**
-   * Poll for task status.
-   */
-  public async get(taskId: string): Promise<TaskObject> {
-    if (this.client.isTestMode) {
-      if (!this.client.mockTaskStore.has(taskId)) {
-        throw new Error(`Task ${taskId} not found in simulator.`);
-      }
-      const createdAt = this.client.mockTaskStore.get(taskId) || 0;
-      const elapsed = Date.now() - createdAt;
-
-      // 0-2s Matching, 2-5s In Progress, >5s Completed
-      let status: any = 'matching';
-      if (elapsed > 5000) status = 'completed';
-      else if (elapsed > 2000) status = 'in_progress';
-
-      return {
-        id: taskId,
-        status: status,
-        created_at: new Date(createdAt).toISOString()
-      };
-    }
-
-    const res = await this.api.get(`/tasks/${taskId}`);
-    return res.data;
-  }
-}
-
-// --- 3. The Proxy Client (Main Entry) ---
+// --- 2. Configuration & Types ---
 
 export type SimulationScenario = 'HAPPY_PATH' | 'BROWNOUT_ACTIVE' | 'INSUFFICIENT_FUNDS';
 
@@ -130,18 +36,16 @@ const ENDPOINTS = {
 export interface ProxyClientConfig {
   apiKey: string;
   environment?: 'mainnet' | 'testnet' | 'local';
-  proxyUrl?: string;
+  proxyUrl?: string; // Support corporate firewalls via 'proxy-agent'
   timeout?: number;
 }
+
+// --- 3. The Proxy Client (Base Class) ---
 
 export class ProxyClient {
   private api: AxiosInstance;
   
-  // Public Namespaces
-  public tasks: TaskHandler;
-  public market: MarketHandler;
-
-  // Internal Simulation State (Accessed by Handlers)
+  // Internal Simulation State
   public isTestMode: boolean = false;
   public activeScenario: SimulationScenario = 'HAPPY_PATH';
   public mockTaskStore: Map<string, number> = new Map();
@@ -149,6 +53,8 @@ export class ProxyClient {
   constructor(config: ProxyClientConfig) {
     const baseURL = ENDPOINTS[config.environment || 'mainnet'];
 
+    // Unified Proxy Support (HTTP/HTTPS/SOCKS)
+    // Automatically detects HTTP_PROXY env vars or uses provided config
     const httpsAgent = new ProxyAgent({
         getProxyForUrl: () => config.proxyUrl || process.env.HTTPS_PROXY || '',
     });
@@ -159,18 +65,14 @@ export class ProxyClient {
       headers: {
         'Authorization': `Bearer ${config.apiKey}`,
         'Content-Type': 'application/json',
-        'User-Agent': 'ProxyProtocol-Node/1.5.0'
+        'User-Agent': 'ProxyProtocol-Node/1.6.0'
       },
       httpAgent: httpsAgent,
       httpsAgent: httpsAgent,
       proxy: false
     });
 
-    // Initialize Handlers
-    this.tasks = new TaskHandler(this.api, this);
-    this.market = new MarketHandler(this.api, this);
-
-    // Error Interceptor
+    // Error Interceptor for Human-Readable Exceptions
     this.api.interceptors.response.use(
       (response) => response,
       (error: AxiosError) => {
@@ -194,10 +96,100 @@ export class ProxyClient {
     );
   }
 
+  /**
+   * Request a Task (The Primary Action)
+   * Broadcasts a new task intent to the Human Proxy network.
+   * * @param taskType - Enum or string defining the job (e.g. 'verify_sms_otp')
+   * @param requirements - Task-specific parameters and context
+   * @param maxBudgetSats - Escrow amount to lock
+   */
+  public async requestTask(
+    taskType: TaskType | string, 
+    requirements: TaskRequirements, 
+    maxBudgetSats: number
+  ): Promise<TaskObject> {
+    if (this.isTestMode) {
+      return this._simulateTaskCreation(maxBudgetSats);
+    }
+
+    const payload = {
+      task_type: taskType,
+      requirements,
+      max_budget_sats: maxBudgetSats
+    };
+    
+    const res = await this.api.post('/request', payload);
+    return res.data;
+  }
+
+  /**
+   * Get Task Status
+   * Poll for completion or check current state.
+   */
+  public async getTask(taskId: string): Promise<TaskObject> {
+    if (this.isTestMode) {
+      return this._simulateTaskPolling(taskId);
+    }
+
+    const res = await this.api.get(`/tasks/${taskId}`);
+    return res.data;
+  }
+
+  /**
+   * Get Market Ticker
+   * Check real-time pricing and congestion.
+   */
+  public async getTicker(): Promise<MarketTicker> {
+    if (this.isTestMode) {
+      return {
+        status: "stable",
+        base_currency: "SATS",
+        rates: { [TaskType.VERIFY_SMS_OTP]: 1000, [TaskType.LEGAL_NOTARY_SIGN]: 50000 },
+        congestion_multiplier: 1.0
+      };
+    }
+    const res = await this.api.get('/market/ticker');
+    return res.data;
+  }
+
+  // --- Simulation Helpers ---
+
   public enableTestMode(scenario: SimulationScenario = 'HAPPY_PATH') {
     this.isTestMode = true;
     this.activeScenario = scenario;
     console.warn(`⚠️ [ProxySDK] SIMULATION ACTIVE. Scenario: ${scenario}`);
+  }
+
+  private _simulateTaskCreation(budget: number): TaskObject {
+    if (this.activeScenario === 'INSUFFICIENT_FUNDS') {
+      throw new InsufficientEscrowError("PX_200", "Insufficient Escrow Balance.", 402);
+    }
+    const mockId = `task_sim_${Date.now()}`;
+    this.mockTaskStore.set(mockId, Date.now());
+    return {
+      id: mockId,
+      status: 'matching',
+      created_at: new Date().toISOString(),
+      assigned_node_id: 'node_simulated_human_alpha'
+    };
+  }
+
+  private _simulateTaskPolling(taskId: string): TaskObject {
+    if (!this.mockTaskStore.has(taskId)) {
+      throw new Error(`Task ${taskId} not found in simulator.`);
+    }
+    const createdAt = this.mockTaskStore.get(taskId) || 0;
+    const elapsed = Date.now() - createdAt;
+    
+    let status: any = 'matching';
+    if (elapsed > 5000) status = 'completed';
+    else if (elapsed > 2000) status = 'in_progress';
+
+    return {
+      id: taskId,
+      status: status,
+      created_at: new Date(createdAt).toISOString()
+    };
   }
 }
 
@@ -216,7 +208,6 @@ export function verifyProxySignature(
   const payload = `${timestamp}.${rawBody}`;
   const hmac = createHmac('sha256', secret);
   const digest = hmac.update(payload).digest('hex');
-
   const signatureBuffer = Buffer.from(signature);
   const digestBuffer = Buffer.from(digest);
 
