@@ -131,4 +131,40 @@ export class ProxyBrowserClient {
   public async getTask(taskId: string): Promise<TaskObject> {
     return this.request<TaskObject>(`/tasks/${taskId}`);
   }
+
+  /**
+   * Smart Polling
+   * Polls for task completion using exponential backoff with jitter.
+   * Prevents API spam while waiting for human execution.
+   * * @param taskId - The ID of the task to monitor
+   * @param timeoutMs - Max duration to poll (default: 5 minutes)
+   * @param baseDelayMs - Initial delay before first retry (default: 1s)
+   */
+  public async pollUntilComplete(
+    taskId: string,
+    timeoutMs: number = 300000, // 5 minutes default
+    baseDelayMs: number = 1000
+  ): Promise<TaskObject> {
+    const startTime = Date.now();
+    let attempt = 0;
+
+    while (Date.now() - startTime < timeoutMs) {
+      const task = await this.getTask(taskId);
+
+      if (task.status === 'completed' || task.status === 'failed') {
+        return task;
+      }
+
+      // Exponential Backoff with Jitter
+      // Delay = min(30s, base * 2^attempt) + random_jitter
+      const exponentialDelay = Math.min(30000, baseDelayMs * Math.pow(2, attempt));
+      const jitter = Math.round(Math.random() * 1000); // 0-1s random jitter
+      const delay = exponentialDelay + jitter;
+
+      await new Promise(resolve => setTimeout(resolve, delay));
+      attempt++;
+    }
+
+    throw new Error(`Polling timed out after ${timeoutMs}ms`);
+  }
 }
