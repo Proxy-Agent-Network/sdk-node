@@ -23,7 +23,101 @@ export class InsufficientEscrowError extends ProxyError { name = 'InsufficientEs
 export class NodeRateLimitedError extends ProxyError { name = 'NodeRateLimitedError'; }
 export class ServerError extends ProxyError { name = 'ServerError'; }
 
-// --- 2. The Proxy Client ---
+// --- 2. Resource Handlers ---
+
+export class MarketHandler {
+  constructor(private api: AxiosInstance, private client: ProxyClient) {}
+
+  /**
+   * Get real-time cost for human tasks.
+   */
+  public async getTicker(): Promise<MarketTicker> {
+    if (this.client.isTestMode) {
+      if (this.client.activeScenario === 'BROWNOUT_ACTIVE') {
+        return {
+          status: "congested",
+          base_currency: "SATS",
+          rates: { [TaskType.VERIFY_SMS_OTP]: 5000, [TaskType.LEGAL_NOTARY_SIGN]: 90000 },
+          congestion_multiplier: 5.0
+        };
+      }
+      return {
+        status: "stable",
+        base_currency: "SATS",
+        rates: { [TaskType.VERIFY_SMS_OTP]: 1000, [TaskType.LEGAL_NOTARY_SIGN]: 50000 },
+        congestion_multiplier: 1.0
+      };
+    }
+    const res = await this.api.get('/market/ticker');
+    return res.data;
+  }
+}
+
+export class TaskHandler {
+  constructor(private api: AxiosInstance, private client: ProxyClient) {}
+
+  /**
+   * Broadcast a new task to the Human Proxy network.
+   */
+  public async create(
+    taskType: TaskType | string, 
+    requirements: TaskRequirements, 
+    maxBudgetSats: number
+  ): Promise<TaskObject> {
+    if (this.client.isTestMode) {
+      // Simulation Logic
+      if (this.client.activeScenario === 'INSUFFICIENT_FUNDS') {
+        throw new InsufficientEscrowError("PX_200", "Insufficient Escrow Balance.", 402);
+      }
+      const mockId = `task_sim_${Date.now()}`;
+      this.client.mockTaskStore.set(mockId, Date.now());
+      return {
+        id: mockId,
+        status: 'matching',
+        created_at: new Date().toISOString(),
+        assigned_node_id: 'node_simulated_human_alpha'
+      };
+    }
+
+    // Real API Call
+    const payload = {
+      task_type: taskType,
+      requirements,
+      max_budget_sats: maxBudgetSats
+    };
+    const res = await this.api.post('/request', payload);
+    return res.data;
+  }
+
+  /**
+   * Poll for task status.
+   */
+  public async get(taskId: string): Promise<TaskObject> {
+    if (this.client.isTestMode) {
+      if (!this.client.mockTaskStore.has(taskId)) {
+        throw new Error(`Task ${taskId} not found in simulator.`);
+      }
+      const createdAt = this.client.mockTaskStore.get(taskId) || 0;
+      const elapsed = Date.now() - createdAt;
+
+      // 0-2s Matching, 2-5s In Progress, >5s Completed
+      let status: any = 'matching';
+      if (elapsed > 5000) status = 'completed';
+      else if (elapsed > 2000) status = 'in_progress';
+
+      return {
+        id: taskId,
+        status: status,
+        created_at: new Date(createdAt).toISOString()
+      };
+    }
+
+    const res = await this.api.get(`/tasks/${taskId}`);
+    return res.data;
+  }
+}
+
+// --- 3. The Proxy Client (Main Entry) ---
 
 export type SimulationScenario = 'HAPPY_PATH' | 'BROWNOUT_ACTIVE' | 'INSUFFICIENT_FUNDS';
 
@@ -36,22 +130,25 @@ const ENDPOINTS = {
 export interface ProxyClientConfig {
   apiKey: string;
   environment?: 'mainnet' | 'testnet' | 'local';
-  proxyUrl?: string; // Support corporate firewalls via 'proxy-agent'
+  proxyUrl?: string;
   timeout?: number;
 }
 
 export class ProxyClient {
   private api: AxiosInstance;
   
-  // Local Simulator State
-  private isTestMode: boolean = false;
-  private activeScenario: SimulationScenario = 'HAPPY_PATH';
-  private mockTaskStore: Map<string, number> = new Map();
+  // Public Namespaces
+  public tasks: TaskHandler;
+  public market: MarketHandler;
+
+  // Internal Simulation State (Accessed by Handlers)
+  public isTestMode: boolean = false;
+  public activeScenario: SimulationScenario = 'HAPPY_PATH';
+  public mockTaskStore: Map<string, number> = new Map();
 
   constructor(config: ProxyClientConfig) {
     const baseURL = ENDPOINTS[config.environment || 'mainnet'];
 
-    // Unified Proxy Support (HTTP/HTTPS/SOCKS)
     const httpsAgent = new ProxyAgent({
         getProxyForUrl: () => config.proxyUrl || process.env.HTTPS_PROXY || '',
     });
@@ -62,14 +159,18 @@ export class ProxyClient {
       headers: {
         'Authorization': `Bearer ${config.apiKey}`,
         'Content-Type': 'application/json',
-        'User-Agent': 'ProxyProtocol-Node/1.4.0'
+        'User-Agent': 'ProxyProtocol-Node/1.5.0'
       },
       httpAgent: httpsAgent,
       httpsAgent: httpsAgent,
       proxy: false
     });
 
-    // Error Interceptor for Human-Readable Exceptions
+    // Initialize Handlers
+    this.tasks = new TaskHandler(this.api, this);
+    this.market = new MarketHandler(this.api, this);
+
+    // Error Interceptor
     this.api.interceptors.response.use(
       (response) => response,
       (error: AxiosError) => {
@@ -93,101 +194,21 @@ export class ProxyClient {
     );
   }
 
-  /**
-   * Enable Local Liveness Simulator (Test Mode)
-   * Intercepts network calls to simulate API responses without spending Sats.
-   */
   public enableTestMode(scenario: SimulationScenario = 'HAPPY_PATH') {
     this.isTestMode = true;
     this.activeScenario = scenario;
     console.warn(`⚠️ [ProxySDK] SIMULATION ACTIVE. Scenario: ${scenario}`);
   }
-
-  public async getTicker(): Promise<MarketTicker> {
-    if (this.isTestMode) {
-      if (this.activeScenario === 'BROWNOUT_ACTIVE') {
-        return {
-          status: "congested",
-          base_currency: "SATS",
-          rates: { [TaskType.VERIFY_SMS_OTP]: 5000, [TaskType.LEGAL_NOTARY_SIGN]: 90000 },
-          congestion_multiplier: 5.0
-        };
-      }
-      return {
-        status: "stable",
-        base_currency: "SATS",
-        rates: { [TaskType.VERIFY_SMS_OTP]: 1000, [TaskType.LEGAL_NOTARY_SIGN]: 50000 },
-        congestion_multiplier: 1.0
-      };
-    }
-    const res = await this.api.get('/market/ticker');
-    return res.data;
-  }
-
-  public async createTask(
-    taskType: TaskType | string, 
-    requirements: TaskRequirements, 
-    maxBudgetSats: number
-  ): Promise<TaskObject> {
-    if (this.isTestMode) {
-      if (this.activeScenario === 'INSUFFICIENT_FUNDS') {
-        throw new InsufficientEscrowError("PX_200", "Insufficient Escrow Balance.", 402);
-      }
-      const mockId = `task_sim_${Date.now()}`;
-      this.mockTaskStore.set(mockId, Date.now());
-      return {
-        id: mockId,
-        status: 'matching',
-        created_at: new Date().toISOString(),
-        assigned_node_id: 'node_simulated_human_alpha'
-      };
-    }
-
-    const payload = {
-      task_type: taskType,
-      requirements,
-      max_budget_sats: maxBudgetSats
-    };
-    const res = await this.api.post('/request', payload);
-    return res.data;
-  }
-
-  public async getTask(taskId: string): Promise<TaskObject> {
-    if (this.isTestMode) {
-      if (!this.mockTaskStore.has(taskId)) throw new Error(`Task ${taskId} not found in simulator.`);
-      const createdAt = this.mockTaskStore.get(taskId) || 0;
-      const elapsed = Date.now() - createdAt;
-
-      // Simulation: 0-2s Matching, 2-5s In Progress, >5s Completed
-      let status: any = 'matching';
-      if (elapsed > 5000) status = 'completed';
-      else if (elapsed > 2000) status = 'in_progress';
-
-      return {
-        id: taskId,
-        status: status,
-        created_at: new Date(createdAt).toISOString()
-      };
-    }
-
-    const res = await this.api.get(`/tasks/${taskId}`);
-    return res.data;
-  }
 }
 
-// --- 3. Webhook Security Utility ---
+// --- 4. Utilities ---
 
-/**
- * Verifies the HMAC-SHA256 signature of a Proxy Protocol webhook.
- * Use this in your Express/FastAPI handlers to prevent spoofing.
- */
 export function verifyProxySignature(
   rawBody: string,
   signature: string,
   timestamp: string,
   secret: string
 ): boolean {
-  // Replay Protection (5m)
   const now = Math.floor(Date.now() / 1000);
   const eventTime = parseInt(timestamp, 10);
   if (isNaN(eventTime) || Math.abs(now - eventTime) > 300) return false;
