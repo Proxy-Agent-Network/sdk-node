@@ -82,6 +82,28 @@ export class ProxyBrowserClient {
   }
 
   /**
+   * Upload Large Asset (Streaming)
+   * Uploads a large file (video/document) to the Proxy Storage (IPFS/S3) via streaming.
+   * Prevents memory overflow on constrained environments (Lambda/Vercel).
+   * * @param data - ReadableStream, Blob, or ArrayBuffer
+   * @param contentType - MIME type (e.g. 'video/mp4', 'application/pdf')
+   */
+  public async uploadAsset(
+    data: ReadableStream | Blob | ArrayBuffer,
+    contentType: string
+  ): Promise<{ url: string; hash: string }> {
+    return this.request<{ url: string; hash: string }>('/uploads', {
+      method: 'POST',
+      headers: {
+        'Content-Type': contentType
+      },
+      body: data as any,
+      // @ts-ignore - 'duplex' is required for streaming request bodies in modern fetch
+      duplex: 'half'
+    });
+  }
+
+  /**
    * Task Creation
    * Broadcast a new task to the Human Proxy network.
    */
