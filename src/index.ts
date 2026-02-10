@@ -13,7 +13,6 @@ export class ProxyError extends Error {
   constructor(public code: string, message: string, public status?: number) {
     super(message);
     this.name = 'ProxyError';
-    // Restore prototype chain for instanceof checks
     Object.setPrototypeOf(this, new.target.prototype);
   }
 }
@@ -32,13 +31,6 @@ export class InsufficientEscrowError extends ProxyError {
   }
 }
 
-export class ValidationFailedError extends ProxyError {
-  constructor(code: string, message: string, status?: number) {
-    super(code, message, status);
-    this.name = 'ValidationFailedError';
-  }
-}
-
 export class NodeRateLimitedError extends ProxyError {
   constructor(code: string, message: string, status?: number) {
     super(code, message, status);
@@ -53,6 +45,10 @@ export class ServerError extends ProxyError {
   }
 }
 
+// --- Simulation Configuration ---
+
+export type SimulationScenario = 'HAPPY_PATH' | 'BROWNOUT_ACTIVE' | 'INSUFFICIENT_FUNDS' | 'RANDOM_LATENCY';
+
 // Environment Endpoints
 const ENDPOINTS = {
   mainnet: 'https://api.proxyprotocol.com/v1',
@@ -63,23 +59,21 @@ const ENDPOINTS = {
 export interface ProxyClientConfig {
   apiKey: string;
   environment?: 'mainnet' | 'testnet' | 'local';
-  proxyUrl?: string; // Optional: Force a specific proxy (SOCKS/HTTP)
+  proxyUrl?: string;
   timeout?: number;
 }
 
 export class ProxyClient {
   private api: AxiosInstance;
-  private env: string;
   
-  // Liveness Simulator State
+  // Simulation State
   private isTestMode: boolean = false;
-  private mockTaskStore: Map<string, number> = new Map(); // Stores ID -> Timestamp
+  private activeScenario: SimulationScenario = 'HAPPY_PATH';
+  private mockTaskStore: Map<string, number> = new Map();
 
   constructor(config: ProxyClientConfig) {
-    this.env = config.environment || 'mainnet';
-    const baseURL = ENDPOINTS[this.env];
+    const baseURL = ENDPOINTS[config.environment || 'mainnet'];
 
-    // Unified Proxy Support (HTTP/HTTPS/SOCKS)
     const httpsAgent = new ProxyAgent({
         getProxyForUrl: () => config.proxyUrl || process.env.HTTPS_PROXY || '',
     });
@@ -90,61 +84,63 @@ export class ProxyClient {
       headers: {
         'Authorization': `Bearer ${config.apiKey}`,
         'Content-Type': 'application/json',
-        'User-Agent': 'ProxyProtocol-Node/1.2.0'
+        'User-Agent': 'ProxyProtocol-Node/1.3.0'
       },
       httpAgent: httpsAgent,
       httpsAgent: httpsAgent,
       proxy: false
     });
 
-    // Install Error Interceptor
+    // Error Interceptor
     this.api.interceptors.response.use(
       (response) => response,
       (error: AxiosError) => {
         if (error.response) {
           const status = error.response.status;
           const data: any = error.response.data;
-          
-          // Fallback message if API doesn't return structured error
           const message = data?.error?.message || error.message;
-          // Use PX_ code if available, else generic HTTP_ code
           const code = data?.error?.code || `HTTP_${status}`;
 
           switch (status) {
-            case 400: throw new ValidationFailedError(code, message, status);
             case 401:
             case 403: throw new AuthenticationError(code, message, status);
             case 402: throw new InsufficientEscrowError(code, message, status);
             case 429: throw new NodeRateLimitedError(code, message, status);
             case 500:
-            case 502:
             case 503: throw new ServerError(code, message, status);
             default: throw new ProxyError(code, message, status);
           }
         }
-        // Network errors (no response) fall through here
         throw error;
       }
     );
   }
 
   /**
-   * Enable Local Liveness Simulator (Test Mode)
-   * * Intercepts all outgoing API calls.
-   * * Simulates a Human Node accepting and completing tasks locally.
-   * * Useful for Unit Tests and CI/CD pipelines where no network is available.
+   * Enable SDK Simulation Mode
+   * Intercepts network calls to simulate API responses without spending Sats.
+   * * @param scenario - Force a specific network condition (Default: HAPPY_PATH)
    */
-  public enableTestMode() {
+  public enableTestMode(scenario: SimulationScenario = 'HAPPY_PATH') {
     this.isTestMode = true;
-    console.warn("⚠️ [ProxySDK] TEST MODE ENABLED. Network calls are mocked.");
+    this.activeScenario = scenario;
+    console.warn(`⚠️ [ProxySDK] SIMULATION ACTIVE. Scenario: ${scenario}`);
   }
 
   /**
    * Market Data
-   * Get real-time cost for human tasks.
    */
   public async getTicker(): Promise<MarketTicker> {
     if (this.isTestMode) {
+      if (this.activeScenario === 'BROWNOUT_ACTIVE') {
+        // Simulate Price Surge
+        return {
+          status: "congested",
+          base_currency: "SATS",
+          rates: { [TaskType.VERIFY_SMS_OTP]: 5000, [TaskType.LEGAL_NOTARY_SIGN]: 90000 },
+          congestion_multiplier: 5.0 // 5x Surge
+        };
+      }
       return {
         status: "stable",
         base_currency: "SATS",
@@ -158,7 +154,6 @@ export class ProxyClient {
 
   /**
    * Task Creation
-   * Hire a human node for a specific job.
    */
   public async createTask(
     taskType: TaskType | string, 
@@ -167,9 +162,31 @@ export class ProxyClient {
   ): Promise<TaskObject> {
     // 1. Simulation Interceptor
     if (this.isTestMode) {
+      // Simulate Delays
+      if (this.activeScenario === 'RANDOM_LATENCY') {
+        const ms = Math.floor(Math.random() * 2000) + 500;
+        await new Promise(r => setTimeout(r, ms));
+      }
+
+      // Simulate Failures
+      if (this.activeScenario === 'BROWNOUT_ACTIVE') {
+        throw new ServerError(
+          "PX_500", 
+          "Network Busy. Brownout Level: ORANGE. Min Rep Required: 700", 
+          503
+        );
+      }
+
+      if (this.activeScenario === 'INSUFFICIENT_FUNDS') {
+        throw new InsufficientEscrowError(
+          "PX_200", 
+          "Insufficient Escrow Balance. Top up Lightning Wallet.", 
+          402
+        );
+      }
+
       const mockId = `task_sim_${Date.now()}`;
       this.mockTaskStore.set(mockId, Date.now());
-      console.log(`[ProxySDK] Simulating Task Creation: ${mockId}`);
       
       return {
         id: mockId,
@@ -191,13 +208,11 @@ export class ProxyClient {
 
   /**
    * Task Status
-   * Poll for completion (or use Webhooks).
    */
   public async getTask(taskId: string): Promise<TaskObject> {
-    // 1. Simulation Interceptor
     if (this.isTestMode) {
       if (!this.mockTaskStore.has(taskId)) {
-        throw new Error(`[ProxySDK] Task ${taskId} not found in local simulator state.`);
+        throw new Error(`[ProxySDK] Task ${taskId} not found in local simulator.`);
       }
 
       const createdAt = this.mockTaskStore.get(taskId) || 0;
@@ -211,8 +226,7 @@ export class ProxyClient {
         status = 'completed';
         result = { 
           proof: "simulated_proof_data_xyz", 
-          verdict: "success",
-          human_note: "Task completed via TestMode simulator."
+          verdict: "success" 
         };
       } else if (elapsed > 2000) {
         status = 'in_progress';
@@ -222,12 +236,10 @@ export class ProxyClient {
         id: taskId,
         status: status,
         created_at: new Date(createdAt).toISOString(),
-        assigned_node_id: 'node_simulated_human_alpha',
         result: result
       };
     }
 
-    // 2. Real Network Call
     const res = await this.api.get(`/tasks/${taskId}`);
     return res.data;
   }
