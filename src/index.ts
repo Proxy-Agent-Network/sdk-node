@@ -1,73 +1,160 @@
-/**
- * Proxy Protocol Type Definitions
- * * Strict typing for Task Payloads to ensure Type Safety in Agent deployments.
- */
+import axios, { AxiosInstance } from 'axios';
+import { ProxyAgent } from 'proxy-agent';
+import { 
+  TaskType, 
+  TaskRequirements, 
+  MarketTicker, 
+  TaskObject 
+} from './types';
 
-// 1. Task Taxonomy
-export enum TaskType {
-  VERIFY_SMS_OTP = 'verify_sms_otp',
-  VERIFY_KYC_VIDEO = 'verify_kyc_video',
-  LEGAL_NOTARY_SIGN = 'legal_notary_sign',
-  PHYSICAL_MAIL_RECEIVE = 'physical_mail_receive',
-  CUSTOM_ADHOC = 'custom_adhoc'
+// Environment Endpoints
+const ENDPOINTS = {
+  mainnet: 'https://api.proxyprotocol.com/v1',
+  testnet: 'https://sandbox.proxyprotocol.com/v1',
+  local: 'http://localhost:3000/v1'
+};
+
+export interface ProxyClientConfig {
+  apiKey: string;
+  environment?: 'mainnet' | 'testnet' | 'local';
+  proxyUrl?: string; // Optional: Force a specific proxy (SOCKS/HTTP)
+  timeout?: number;
 }
 
-// 2. Requirement Schemas (The "Context")
+export class ProxyClient {
+  private api: AxiosInstance;
+  private env: string;
+  
+  // Liveness Simulator State
+  private isTestMode: boolean = false;
+  private mockTaskStore: Map<string, number> = new Map(); // Stores ID -> Timestamp
 
-export interface BaseRequirements {
-  instructions?: string;
-  timeout_seconds?: number; // Default: 14400 (4 hours)
+  constructor(config: ProxyClientConfig) {
+    this.env = config.environment || 'mainnet';
+    const baseURL = ENDPOINTS[this.env];
+
+    // Unified Proxy Support (HTTP/HTTPS/SOCKS)
+    const httpsAgent = new ProxyAgent({
+        getProxyForUrl: () => config.proxyUrl || process.env.HTTPS_PROXY || '',
+    });
+
+    this.api = axios.create({
+      baseURL,
+      timeout: config.timeout || 10000,
+      headers: {
+        'Authorization': `Bearer ${config.apiKey}`,
+        'Content-Type': 'application/json',
+        'User-Agent': 'ProxyProtocol-Node/1.2.0'
+      },
+      httpAgent: httpsAgent,
+      httpsAgent: httpsAgent,
+      proxy: false
+    });
+  }
+
+  /**
+   * Enable Local Liveness Simulator (Test Mode)
+   * * Intercepts all outgoing API calls.
+   * * Simulates a Human Node accepting and completing tasks locally.
+   * * Useful for Unit Tests and CI/CD pipelines where no network is available.
+   */
+  public enableTestMode() {
+    this.isTestMode = true;
+    console.warn("⚠️ [ProxySDK] TEST MODE ENABLED. Network calls are mocked.");
+  }
+
+  /**
+   * Market Data
+   * Get real-time cost for human tasks.
+   */
+  public async getTicker(): Promise<MarketTicker> {
+    if (this.isTestMode) {
+      return {
+        status: "stable",
+        base_currency: "SATS",
+        rates: { [TaskType.VERIFY_SMS_OTP]: 1000, [TaskType.LEGAL_NOTARY_SIGN]: 50000 },
+        congestion_multiplier: 1.0
+      };
+    }
+    const res = await this.api.get('/market/ticker');
+    return res.data;
+  }
+
+  /**
+   * Task Creation
+   * Hire a human node for a specific job.
+   */
+  public async createTask(
+    taskType: TaskType | string, 
+    requirements: TaskRequirements, 
+    maxBudgetSats: number
+  ): Promise<TaskObject> {
+    // 1. Simulation Interceptor
+    if (this.isTestMode) {
+      const mockId = `task_sim_${Date.now()}`;
+      this.mockTaskStore.set(mockId, Date.now());
+      console.log(`[ProxySDK] Simulating Task Creation: ${mockId}`);
+      
+      return {
+        id: mockId,
+        status: 'matching',
+        created_at: new Date().toISOString(),
+        assigned_node_id: 'node_simulated_human_alpha'
+      };
+    }
+
+    // 2. Real Network Call
+    const payload = {
+      task_type: taskType,
+      requirements,
+      max_budget_sats: maxBudgetSats
+    };
+    const res = await this.api.post('/request', payload);
+    return res.data;
+  }
+
+  /**
+   * Task Status
+   * Poll for completion (or use Webhooks).
+   */
+  public async getTask(taskId: string): Promise<TaskObject> {
+    // 1. Simulation Interceptor
+    if (this.isTestMode) {
+      if (!this.mockTaskStore.has(taskId)) {
+        throw new Error(`[ProxySDK] Task ${taskId} not found in local simulator state.`);
+      }
+
+      const createdAt = this.mockTaskStore.get(taskId) || 0;
+      const elapsed = Date.now() - createdAt;
+
+      // Logic: 0-2s Matching, 2-5s In Progress, >5s Completed
+      let status: 'matching' | 'in_progress' | 'completed' = 'matching';
+      let result = undefined;
+
+      if (elapsed > 5000) {
+        status = 'completed';
+        result = { 
+          proof: "simulated_proof_data_xyz", 
+          verdict: "success",
+          human_note: "Task completed via TestMode simulator."
+        };
+      } else if (elapsed > 2000) {
+        status = 'in_progress';
+      }
+
+      return {
+        id: taskId,
+        status: status,
+        created_at: new Date(createdAt).toISOString(),
+        assigned_node_id: 'node_simulated_human_alpha',
+        result: result
+      };
+    }
+
+    // 2. Real Network Call
+    const res = await this.api.get(`/tasks/${taskId}`);
+    return res.data;
+  }
 }
 
-export interface SmsRequirements extends BaseRequirements {
-  service: string; // e.g. "OpenAI", "Twitter"
-  country: string; // ISO 3166-1 alpha-2 code (e.g. "US", "BR")
-  sender_id_filter?: string; // Optional: Only accept SMS from this sender
-}
-
-export interface KycRequirements extends BaseRequirements {
-  platform_url: string;
-  id_document_types: ('passport' | 'drivers_license' | 'national_id')[];
-  liveness_check: boolean;
-}
-
-export interface LegalRequirements extends BaseRequirements {
-  jurisdiction: 'US_DE' | 'UK' | 'SG';
-  document_url: string; // Must be a pre-signed URL accessible to the Human Node
-  signature_capacity: 'witness' | 'attorney_in_fact' | 'notary';
-  notary_seal_required: boolean;
-}
-
-export interface MailRequirements extends BaseRequirements {
-  recipient_name: string;
-  scanning_instructions: 'scan_envelope' | 'scan_contents' | 'forward_physical';
-  shred_after_scan: boolean;
-}
-
-// 3. Union Type for Flexible but Strict Input
-export type TaskRequirements = 
-  | SmsRequirements 
-  | KycRequirements 
-  | LegalRequirements 
-  | MailRequirements;
-
-// 4. API Response Shapes
-export interface TickerRate {
-  sats: number;
-  fiat_estimated_usd: number;
-}
-
-export interface MarketTicker {
-  status: string;
-  base_currency: string;
-  rates: Record<TaskType | string, number>;
-  congestion_multiplier: number;
-}
-
-export interface TaskObject {
-  id: string;
-  status: 'matching' | 'in_progress' | 'completed' | 'failed';
-  created_at: string;
-  assigned_node_id?: string;
-  result?: any;
-}
+export * from './types';
