@@ -1,4 +1,4 @@
-import axios, { AxiosInstance } from 'axios';
+import axios, { AxiosInstance, AxiosError } from 'axios';
 import { ProxyAgent } from 'proxy-agent';
 import { 
   TaskType, 
@@ -6,6 +6,52 @@ import {
   MarketTicker, 
   TaskObject 
 } from './types';
+
+// --- Custom Error Classes ---
+
+export class ProxyError extends Error {
+  constructor(public code: string, message: string, public status?: number) {
+    super(message);
+    this.name = 'ProxyError';
+    // Restore prototype chain for instanceof checks
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
+export class AuthenticationError extends ProxyError {
+  constructor(code: string, message: string, status?: number) {
+    super(code, message, status);
+    this.name = 'AuthenticationError';
+  }
+}
+
+export class InsufficientEscrowError extends ProxyError {
+  constructor(code: string, message: string, status?: number) {
+    super(code, message, status);
+    this.name = 'InsufficientEscrowError';
+  }
+}
+
+export class ValidationFailedError extends ProxyError {
+  constructor(code: string, message: string, status?: number) {
+    super(code, message, status);
+    this.name = 'ValidationFailedError';
+  }
+}
+
+export class NodeRateLimitedError extends ProxyError {
+  constructor(code: string, message: string, status?: number) {
+    super(code, message, status);
+    this.name = 'NodeRateLimitedError';
+  }
+}
+
+export class ServerError extends ProxyError {
+  constructor(code: string, message: string, status?: number) {
+    super(code, message, status);
+    this.name = 'ServerError';
+  }
+}
 
 // Environment Endpoints
 const ENDPOINTS = {
@@ -50,6 +96,36 @@ export class ProxyClient {
       httpsAgent: httpsAgent,
       proxy: false
     });
+
+    // Install Error Interceptor
+    this.api.interceptors.response.use(
+      (response) => response,
+      (error: AxiosError) => {
+        if (error.response) {
+          const status = error.response.status;
+          const data: any = error.response.data;
+          
+          // Fallback message if API doesn't return structured error
+          const message = data?.error?.message || error.message;
+          // Use PX_ code if available, else generic HTTP_ code
+          const code = data?.error?.code || `HTTP_${status}`;
+
+          switch (status) {
+            case 400: throw new ValidationFailedError(code, message, status);
+            case 401:
+            case 403: throw new AuthenticationError(code, message, status);
+            case 402: throw new InsufficientEscrowError(code, message, status);
+            case 429: throw new NodeRateLimitedError(code, message, status);
+            case 500:
+            case 502:
+            case 503: throw new ServerError(code, message, status);
+            default: throw new ProxyError(code, message, status);
+          }
+        }
+        // Network errors (no response) fall through here
+        throw error;
+      }
+    );
   }
 
   /**
