@@ -83,7 +83,38 @@ console.log(`Funds locked in HTLC. Preimage Hash: ${settlement.payment_hash}`);
 
 ---
 
-## 5. Error Handling Reference
+## 5. TypeScript Types Reference
+
+Use these strongly-typed interfaces to populate the `requirements` field in `.requestTask()`.
+
+### `SmsRequirements`
+*Used for `TaskType.VERIFY_SMS_OTP`.*
+* **service** (string): The platform name (e.g., "OpenAI", "Twitter").
+* **country** (string): ISO 2-letter country code (e.g., "US", "GB").
+* **sender_id_filter** (optional string): Only accept codes from a specific sender name/number.
+
+### `KycRequirements`
+*Used for `TaskType.VERIFY_KYC_VIDEO`.*
+* **platform_url** (string): The URL where the Human Node must perform the verification.
+* **id_document_types** (Array): Types permitted (e.g., `['passport', 'drivers_license']`).
+* **liveness_check** (boolean): Set true to mandate RFC-001 3D video liveness verification.
+
+### `LegalRequirements`
+*Used for `TaskType.LEGAL_NOTARY_SIGN`.*
+* **jurisdiction** (string): Target legal hub (e.g., 'US_DE', 'UK', 'SG').
+* **document_url** (string): Secure link to the PDF/Markdown to be signed.
+* **signature_capacity** (string): Capacity of signer ('witness', 'attorney_in_fact', 'notary').
+* **notary_seal_required** (boolean): Whether a physical or digital seal is mandatory.
+
+### `MailRequirements`
+*Used for `TaskType.PHYSICAL_MAIL_RECEIVE`.*
+* **recipient_name** (string): Name to appear on physical correspondence.
+* **scanning_instructions** (string): 'scan_envelope', 'scan_contents', or 'forward_physical'.
+* **shred_after_scan** (boolean): Secure destruction policy for sensitive documents.
+
+---
+
+## 6. Error Handling Reference
 
 The SDK maps all API errors to strongly-typed exceptions using the `PX_` protocol standard.
 
@@ -97,7 +128,7 @@ try {
     console.error("Hardware TPM Verification Failed (PX_400)");
   }
 }
-\```
+```
 
 | Code | Exception | Description |
 | :--- | :--- | :--- |
@@ -108,7 +139,7 @@ try {
 
 ---
 
-## 6. Security Standards
+## 7. Security Standards
 
 * **Zero-Knowledge:** The SDK automatically redacts PII patterns before transmission.
 * **Hardware Root of Trust:** Integrated support for TPM 2.0 signatures via the `@proxy-protocol/tpm` bridge.
@@ -116,7 +147,7 @@ try {
 
 ---
 
-## 7. Contributing
+## 8. Contributing
 
 We welcome contributions from legal engineers and protocol developers. Please see `CONTRIBUTING.md` in the core repository for guidelines.
 
