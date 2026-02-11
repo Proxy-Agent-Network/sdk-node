@@ -88,33 +88,76 @@ console.log(`Funds locked in HTLC. Preimage Hash: ${settlement.payment_hash}`);
 Use these strongly-typed interfaces to populate the `requirements` field in `.requestTask()`.
 
 ### `SmsRequirements`
-*Used for `TaskType.VERIFY_SMS_OTP`.*
+*Used for `TaskType.VERIFY_SMS_OTP`*
 * **service** (string): The platform name (e.g., "OpenAI", "Twitter").
 * **country** (string): ISO 2-letter country code (e.g., "US", "GB").
 * **sender_id_filter** (optional string): Only accept codes from a specific sender name/number.
 
 ### `KycRequirements`
-*Used for `TaskType.VERIFY_KYC_VIDEO`.*
+*Used for `TaskType.VERIFY_KYC_VIDEO`*
 * **platform_url** (string): The URL where the Human Node must perform the verification.
 * **id_document_types** (Array): Types permitted (e.g., `['passport', 'drivers_license']`).
-* **liveness_check** (boolean): Set true to mandate RFC-001 3D video liveness verification.
+* **liveness_check** (boolean): Set `true` to mandate RFC-001 3D video liveness verification.
 
 ### `LegalRequirements`
-*Used for `TaskType.LEGAL_NOTARY_SIGN`.*
+*Used for `TaskType.LEGAL_NOTARY_SIGN`*
 * **jurisdiction** (string): Target legal hub (e.g., 'US_DE', 'UK', 'SG').
 * **document_url** (string): Secure link to the PDF/Markdown to be signed.
 * **signature_capacity** (string): Capacity of signer ('witness', 'attorney_in_fact', 'notary').
 * **notary_seal_required** (boolean): Whether a physical or digital seal is mandatory.
 
 ### `MailRequirements`
-*Used for `TaskType.PHYSICAL_MAIL_RECEIVE`.*
+*Used for `TaskType.PHYSICAL_MAIL_RECEIVE`*
 * **recipient_name** (string): Name to appear on physical correspondence.
 * **scanning_instructions** (string): 'scan_envelope', 'scan_contents', or 'forward_physical'.
 * **shred_after_scan** (boolean): Secure destruction policy for sensitive documents.
 
 ---
 
-## 6. Error Handling Reference
+## 6. Webhook Verification
+
+Secure your backend by verifying that incoming requests truly originate from the Proxy Network. Use the `verifyProxySignature` utility to prevent Man-in-the-Middle (MITM) attacks.
+
+> [!IMPORTANT]
+> You must use the **raw request body** for verification. Do not use the parsed JSON object.
+
+### Express.js Example
+```typescript
+import express from 'express';
+import { verifyProxySignature } from '@proxy-protocol/node';
+
+const app = express();
+const WEBHOOK_SECRET = process.env.PROXY_WEBHOOK_SECRET; // whsec_...
+
+// Use express.raw to get the unparsed body for HMAC verification
+app.post('/webhooks/proxy', express.raw({ type: 'application/json' }), (req, res) => {
+  const signature = req.headers['x-proxy-signature'] as string;
+  const timestamp = req.headers['x-proxy-request-timestamp'] as string;
+  const rawBody = req.body.toString();
+
+  try {
+    const isValid = verifyProxySignature(rawBody, signature, timestamp, WEBHOOK_SECRET!);
+
+    if (!isValid) {
+      return res.status(401).send('Invalid Signature');
+    }
+
+    // Now it is safe to parse the JSON
+    const event = JSON.parse(rawBody);
+    console.log(`Received verified event: ${event.type}`);
+
+    res.status(200).json({ received: true });
+  } catch (err) {
+    res.status(400).send(`Webhook Error: ${err.message}`);
+  }
+});
+
+app.listen(8080);
+```
+
+---
+
+## 7. Error Handling Reference
 
 The SDK maps all API errors to strongly-typed exceptions using the `PX_` protocol standard.
 
@@ -139,7 +182,7 @@ try {
 
 ---
 
-## 7. Security Standards
+## 8. Security Standards
 
 * **Zero-Knowledge:** The SDK automatically redacts PII patterns before transmission.
 * **Hardware Root of Trust:** Integrated support for TPM 2.0 signatures via the `@proxy-protocol/tpm` bridge.
@@ -147,7 +190,7 @@ try {
 
 ---
 
-## 8. Contributing
+## 9. Contributing
 
 We welcome contributions from legal engineers and protocol developers. Please see `CONTRIBUTING.md` in the core repository for guidelines.
 
