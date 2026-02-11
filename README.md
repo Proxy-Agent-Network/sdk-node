@@ -54,7 +54,7 @@ main();
 
 ## 3. Configuration & Authentication
 
-The SDK requires a Secret Key (`sk_live_...`) for all production requests. We recommend using environment variables to keep your keys secure.
+The SDK requires a **Secret Key** (`sk_live_...`) for all production requests. We recommend using environment variables to keep your keys secure.
 
 | Variable | Description | Default |
 | :--- | :--- | :--- |
@@ -97,7 +97,7 @@ Use these strongly-typed interfaces to populate the `requirements` field in `.re
 *Used for `TaskType.VERIFY_KYC_VIDEO`*
 * **platform_url** (string): The URL where the Human Node must perform the verification.
 * **id_document_types** (Array): Types permitted (e.g., `['passport', 'drivers_license']`).
-* **liveness_check** (boolean): Set `true` to mandate RFC-001 3D video liveness verification.
+* **liveness_check** (boolean): Set true to mandate RFC-001 3D video liveness verification.
 
 ### `LegalRequirements`
 *Used for `TaskType.LEGAL_NOTARY_SIGN`*
@@ -114,11 +114,52 @@ Use these strongly-typed interfaces to populate the `requirements` field in `.re
 
 ---
 
-## 6. Webhook Verification
+## 6. Sandbox Integration
+
+Test your agent's logic without spending real Bitcoin. The SDK includes a local sandbox server that mocks the entire Proxy Network lifecycle.
+
+### Start the Sandbox
+```bash
+# From the sdk-node directory
+npm run sandbox
+```
+
+### Connect the Client
+```typescript
+const client = new ProxyClient({
+  apiKey: 'pk_test_sandbox_identity',
+  environment: 'local' // Points to http://localhost:3000
+});
+```
+
+---
+
+## 7. Browser Usage
+
+For client-side agents or dashboards, use the lightweight `ProxyBrowserClient`. This client uses native fetch and is optimized for bundle size.
+
+> [!CAUTION]
+> **Security Note:** Always use **Publishable Keys** (`pk_test_...`) in the browser. Never expose your Secret Keys (`sk_live_...`).
+
+```typescript
+import { ProxyBrowserClient } from '@proxy-protocol/node/browser';
+
+const browserClient = new ProxyBrowserClient({
+  apiKey: 'pk_test_...',
+  environment: 'mainnet'
+});
+
+// Smart Polling with exponential backoff and jitter
+const task = await browserClient.pollUntilComplete('tkt_88293');
+```
+
+---
+
+## 8. Webhook Verification
 
 Secure your backend by verifying that incoming requests truly originate from the Proxy Network. Use the `verifyProxySignature` utility to prevent Man-in-the-Middle (MITM) attacks.
 
-> [!IMPORTANT]
+> [!NOTE]
 > You must use the **raw request body** for verification. Do not use the parsed JSON object.
 
 ### Express.js Example
@@ -157,7 +198,7 @@ app.listen(8080);
 
 ---
 
-## 7. Error Handling Reference
+## 9. Error Handling Reference
 
 The SDK maps all API errors to strongly-typed exceptions using the `PX_` protocol standard.
 
@@ -182,7 +223,7 @@ try {
 
 ---
 
-## 8. Security Standards
+## 10. Security Standards
 
 * **Zero-Knowledge:** The SDK automatically redacts PII patterns before transmission.
 * **Hardware Root of Trust:** Integrated support for TPM 2.0 signatures via the `@proxy-protocol/tpm` bridge.
@@ -190,7 +231,7 @@ try {
 
 ---
 
-## 9. Contributing
+## 11. Contributing
 
 We welcome contributions from legal engineers and protocol developers. Please see `CONTRIBUTING.md` in the core repository for guidelines.
 
