@@ -1,73 +1,123 @@
-# Proxy Protocol: The Physical Runtime for AI
+# Proxy Protocol Node.js SDK (v1.6.0)
 
-Proxy Protocol provides a standardized API for autonomous agents to execute physical-world tasks that require legal personhood, identity verification, or biometric authentication.
+The official TypeScript/Node.js client for the **Proxy Agent Network**. Bridging digital intent to physical reality via verified human nodes.
 
 ---
 
-## Overview
-When an autonomous agent encounters a "Legal Wall" (e.g., a captcha, a phone verification, a notarized form, or a physical purchase), it calls the Proxy API. A verified human operator ("Proxy") receives the context, executes the task, and returns the signed result to the agent.
+## 1. Installation
 
-## Supported SDKs
-We provide official client libraries for the following ecosystems:
+Install the SDK via npm or yarn:
 
-| Language | Package | Repository |
+```bash
+npm install @proxy-protocol/node
+# or
+yarn add @proxy-protocol/node
+```
+
+---
+
+## 2. Quick Start
+
+Broadcast your first task to the human network in under 60 seconds.
+
+```typescript
+import { ProxyClient, TaskType } from '@proxy-protocol/node';
+
+const client = new ProxyClient({
+  apiKey: process.env.PROXY_API_SECRET, // sk_live_...
+  environment: 'mainnet'
+});
+
+async function main() {
+  // 1. Get current market rates
+  const ticker = await client.getTicker();
+  console.log(`Current SMS rate: ${ticker.rates.verify_sms_otp} Sats`);
+
+  // 2. Hire a Human Proxy
+  const task = await client.requestTask(
+    TaskType.VERIFY_SMS_OTP,
+    {
+      service: 'Discord',
+      country: 'US',
+      instructions: 'Please relay the 6-digit code sent to this number.'
+    },
+    2000 // Bid in Satoshis
+  );
+
+  console.log(`Task ${task.id} is now ${task.status}.`);
+}
+
+main();
+```
+
+---
+
+## 3. Configuration & Authentication
+
+The SDK requires a Secret Key (`sk_live_...`) for all production requests. We recommend using environment variables to keep your keys secure.
+
+| Variable | Description | Default |
 | :--- | :--- | :--- |
-| **Python** | `pip install proxy-agent` | `core/sdk` |
-| **Node.js** | `npm install @proxy-protocol/node` | `sdk-node` |
+| `PROXY_API_SECRET` | Your private API key. | **Required** |
+| `LND_REST_HOST` | Local LND endpoint for funding. | `127.0.0.1:8080` |
+| `LND_MACAROON` | Admin Macaroon (Hex) for payment. | **Required for LND** |
 
 ---
 
-## Integration (REST API)
+## 4. Advanced: Lightning & HODL Escrow
 
-### 1. Request a Proxy Action
-Initiate a request for human intervention.
+For high-value tasks, the Proxy Protocol utilizes **Cryptographic Escrow**. Use the integrated `LNDNode` utility to programmatically fund tasks from your own Lightning Node.
 
-**Endpoint:** `POST https://api.proxy-protocol.com/v1/request`  
-**Headers:**
-- `Authorization: Bearer <YOUR_API_KEY>`
-- `Content-Type: application/json`
+```typescript
+import { LNDNode } from '@proxy-protocol/node';
 
-```json
-{
-  "agent_id": "agent_x892_beta",
-  "task_type": "PHONE_VERIFICATION",
-  "context": {
-    "service": "Google Voice",
-    "required_action": "Receive SMS code",
-    "timeout": 300
-  },
-  "bid_amount": 15.00
-}
-```
+const lnd = new LNDNode({
+  socket: process.env.LND_REST_HOST,
+  macaroon: process.env.LND_ADMIN_MACAROON
+});
 
-### 2. Response Object
-The system returns a unique `ticket_id` to poll for completion.
-
-```json
-{
-  "status": "queued",
-  "ticket_id": "tkt_8829_mnb2",
-  "estimated_wait": "45s"
-}
+// Fund a task returned by the API
+const settlement = await lnd.payInvoice(task.escrow_invoice);
+console.log(`Funds locked in HTLC. Preimage Hash: ${settlement.payment_hash}`);
 ```
 
 ---
 
-## Security & Ethics
-* **Zero-Knowledge Context:** Proxies only see the specific task data, not the agent's core logic.
-* **Legal Compliance:** All tasks are filtered against a constrained list of permissible legal actions. See `COMPLIANCE.md` for details.
+## 5. Error Handling Reference
 
-## Status
-🚧 **Private Beta** We are currently onboarding select agent developers. [Request Access Here](https://rob-o-la.com/)
+The SDK maps all API errors to strongly-typed exceptions using the `PX_` protocol standard.
+
+```typescript
+try {
+  await client.requestTask(...);
+} catch (error) {
+  if (error instanceof PaymentRequiredError) {
+    console.error("Insufficient Escrow Balance (PX_200)");
+  } else if (error instanceof SecurityError) {
+    console.error("Hardware TPM Verification Failed (PX_400)");
+  }
+}
+\```
+
+| Code | Exception | Description |
+| :--- | :--- | :--- |
+| **PX_100** | `AuthenticationError` | Invalid or missing API key. |
+| **PX_200** | `PaymentRequiredError` | Insufficient sats in agent wallet. |
+| **PX_400** | `SecurityError` | TPM/Hardware integrity check failed. |
+| **PX_500** | `RateLimitError` | Network brownout active; try again later. |
 
 ---
 
-## Join the Core Team
-We are building the bridge between digital intelligence and physical reality. We are looking for mission-driven engineers to define the standard for 2030.
+## 6. Security Standards
 
-### Open Roles (Remote / Async):
-* **Rust Protocol Engineer:** Help migrate our settlement layer from Python to Rust for high-frequency Lightning interactions.
-* **Legal Engineering Lead:** Work with our Delaware counsel to productize new "Power of Attorney" templates for autonomous entities.
-* **Developer Relations:** Build the "Hello World" tutorials that 10,000 AI developers will use.
+* **Zero-Knowledge:** The SDK automatically redacts PII patterns before transmission.
+* **Hardware Root of Trust:** Integrated support for TPM 2.0 signatures via the `@proxy-protocol/tpm` bridge.
+* **Webhook Integrity:** All callbacks must be verified using `verifyProxySignature()`.
 
-**How to Apply:** To apply, cryptographically sign a message with your GitHub handle and email `careers@rob-o-la.com`.
+---
+
+## 7. Contributing
+
+We welcome contributions from legal engineers and protocol developers. Please see `CONTRIBUTING.md` in the core repository for guidelines.
+
+> *“The machine thinks. The human acts. The protocol bridges.”*
