@@ -1,20 +1,23 @@
 import { createHmac, timingSafeEqual } from 'crypto';
 
 /**
- * Proxy Protocol - Webhook Security Utilities
+ * Proxy Protocol - Webhook Security Utilities (v1.6.0)
+ * ----------------------------------------------------
  */
 
 /**
  * Verifies the HMAC-SHA256 signature of a Proxy Protocol webhook request.
- * * Prevents Man-in-the-Middle (MITM) replay attacks and authenticates that
- * the payload truly originated from the Proxy Network.
+ * * This ensures:
+ * 1. The payload originated from the Proxy Network (Authentication).
+ * 2. The payload was not modified in transit (Integrity).
+ * 3. The request is not a re-broadcast of an old event (Replay Protection).
  *
- * @param rawBody - The raw string body of the POST request. DO NOT parse JSON first.
- * @param signature - The value of the 'X-Proxy-Signature' header.
- * @param timestamp - The value of the 'X-Proxy-Request-Timestamp' header.
- * @param secret - Your webhook signing secret (starts with 'whsec_').
- * * @returns boolean - True if the signature is valid and authentic.
- * @throws Error if the timestamp is too old (Replay Attack Protection).
+ * @param rawBody - The unparsed string body of the POST request.
+ * @param signature - The 'x-proxy-signature' header value.
+ * @param timestamp - The 'x-proxy-request-timestamp' header value.
+ * @param secret - Your webhook signing secret (whsec_...).
+ * @returns boolean - True if the signature is valid.
+ * @throws Error if the timestamp is invalid or outside the 5-minute tolerance.
  */
 export function verifyProxySignature(
   rawBody: string,
@@ -22,34 +25,38 @@ export function verifyProxySignature(
   timestamp: string,
   secret: string
 ): boolean {
-  // 1. Replay Attack Protection (5 Minute Tolerance)
-  const now = Math.floor(Date.now() / 1000);
+  // 1. Validate Timestamp Existence
   const eventTime = parseInt(timestamp, 10);
-  
   if (isNaN(eventTime)) {
-    throw new Error("Invalid timestamp header.");
+    throw new Error("PX_SECURITY_ERR: Invalid or missing timestamp header.");
   }
 
-  if (Math.abs(now - eventTime) > 300) {
-    throw new Error("Request timestamp is outside the tolerance window (5m). Possible replay attack.");
+  // 2. Replay Attack Protection
+  // Reject requests older than 5 minutes or more than 5 minutes in the future.
+  const now = Math.floor(Date.now() / 1000);
+  const tolerance = 300; // 5 minutes
+
+  if (Math.abs(now - eventTime) > tolerance) {
+    throw new Error("PX_SECURITY_ERR: Request timestamp outside 5m window. Potential replay attack.");
   }
 
-  // 2. Construct the Signed Payload
-  // Format: timestamp + "." + raw_body
+  // 3. Construct the Signed Payload
+  // Protocol Standard: timestamp + "." + raw_body
   const payload = `${timestamp}.${rawBody}`;
 
-  // 3. Compute Expected Signature
+  // 4. Compute Expected Signature
   const hmac = createHmac('sha256', secret);
-  const digest = hmac.update(payload).digest('hex');
+  const expectedSignature = hmac.update(payload).digest('hex');
 
-  // 4. Constant-Time Comparison
-  // Prevents timing attacks where an attacker guesses the signature character by character.
-  const signatureBuffer = Buffer.from(signature);
-  const digestBuffer = Buffer.from(digest);
+  // 5. Constant-Time Comparison
+  // Prevents attackers from measuring CPU cycles to guess the signature byte-by-byte.
+  const signatureBuffer = Buffer.from(signature, 'hex');
+  const expectedBuffer = Buffer.from(expectedSignature, 'hex');
 
-  if (signatureBuffer.length !== digestBuffer.length) {
+  // timingSafeEqual requires buffers of identical length
+  if (signatureBuffer.length !== expectedBuffer.length) {
     return false;
   }
 
-  return timingSafeEqual(signatureBuffer, digestBuffer);
+  return timingSafeEqual(signatureBuffer, expectedBuffer);
 }
