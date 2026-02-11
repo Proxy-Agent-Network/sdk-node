@@ -1,6 +1,5 @@
 import axios, { AxiosInstance, AxiosError } from 'axios';
 import { ProxyAgent } from 'proxy-agent';
-import { createHmac, timingSafeEqual } from 'crypto';
 import { 
   TaskType, 
   TaskRequirements, 
@@ -21,9 +20,32 @@ export class ProxyError extends Error {
 export class AuthenticationError extends ProxyError { name = 'AuthenticationError'; }
 export class InsufficientEscrowError extends ProxyError { name = 'InsufficientEscrowError'; }
 export class NodeRateLimitedError extends ProxyError { name = 'NodeRateLimitedError'; }
+export class InvalidRequestError extends ProxyError { name = 'InvalidRequestError'; }
 export class ServerError extends ProxyError { name = 'ServerError'; }
 
-// --- 2. Configuration & Types ---
+// --- 2. Internal Validation Schemas (Codified from Canvas specs/v1/requirement_schemas.json) ---
+const REQUIREMENT_SCHEMAS: Record<string, any> = {
+  [TaskType.VERIFY_SMS_OTP]: {
+    required: ['service', 'country'],
+    patterns: { country: /^[A-Z]{2}$/ }
+  },
+  [TaskType.VERIFY_KYC_VIDEO]: {
+    required: ['platform_url', 'id_document_types', 'liveness_check']
+  },
+  [TaskType.LEGAL_NOTARY_SIGN]: {
+    required: ['jurisdiction', 'document_url', 'signature_capacity', 'notary_seal_required'],
+    enums: {
+      jurisdiction: ['US_DE', 'UK', 'SG'],
+      signature_capacity: ['witness', 'attorney_in_fact', 'notary']
+    }
+  },
+  [TaskType.PHYSICAL_MAIL_RECEIVE]: {
+    required: ['recipient_name', 'scanning_instructions', 'shred_after_scan'],
+    enums: {
+      scanning_instructions: ['scan_envelope', 'scan_contents', 'forward_physical']
+    }
+  }
+};
 
 export type SimulationScenario = 'HAPPY_PATH' | 'BROWNOUT_ACTIVE' | 'INSUFFICIENT_FUNDS';
 
@@ -33,10 +55,19 @@ const ENDPOINTS = {
   local: 'http://localhost:3000/v1'
 };
 
+// Internal Jurisdiction Mapping
+const JURISDICTION_TEMPLATES: Record<string, string> = {
+  'US': 'templates/legal/us_delaware_poa.md',
+  'GB': 'templates/legal/uk_poa.md',
+  'SG': 'templates/legal/singapore_poa.md'
+};
+
+const DEFAULT_LEGAL_TEMPLATE = 'templates/legal/ai_power_of_attorney.md';
+
 export interface ProxyClientConfig {
   apiKey: string;
   environment?: 'mainnet' | 'testnet' | 'local';
-  proxyUrl?: string; // Support corporate firewalls via 'proxy-agent'
+  proxyUrl?: string; 
   timeout?: number;
 }
 
@@ -45,16 +76,12 @@ export interface ProxyClientConfig {
 export class ProxyClient {
   private api: AxiosInstance;
   
-  // Internal Simulation State
   public isTestMode: boolean = false;
   public activeScenario: SimulationScenario = 'HAPPY_PATH';
   public mockTaskStore: Map<string, number> = new Map();
 
   constructor(config: ProxyClientConfig) {
     const baseURL = ENDPOINTS[config.environment || 'mainnet'];
-
-    // Unified Proxy Support (HTTP/HTTPS/SOCKS)
-    // Automatically detects HTTP_PROXY env vars or uses provided config
     const httpsAgent = new ProxyAgent({
         getProxyForUrl: () => config.proxyUrl || process.env.HTTPS_PROXY || '',
     });
@@ -65,14 +92,13 @@ export class ProxyClient {
       headers: {
         'Authorization': `Bearer ${config.apiKey}`,
         'Content-Type': 'application/json',
-        'User-Agent': 'ProxyProtocol-Node/1.6.0'
+        'User-Agent': 'ProxyProtocol-Node/1.7.2'
       },
       httpAgent: httpsAgent,
       httpsAgent: httpsAgent,
       proxy: false
     });
 
-    // Error Interceptor for Human-Readable Exceptions
     this.api.interceptors.response.use(
       (response) => response,
       (error: AxiosError) => {
@@ -85,6 +111,7 @@ export class ProxyClient {
             case 401:
             case 403: throw new AuthenticationError(code, message, status);
             case 402: throw new InsufficientEscrowError(code, message, status);
+            case 400: throw new InvalidRequestError(code, message, status);
             case 429: throw new NodeRateLimitedError(code, message, status);
             case 500:
             case 503: throw new ServerError(code, message, status);
@@ -97,17 +124,65 @@ export class ProxyClient {
   }
 
   /**
+   * Pre-flight Validator (v1.7.2)
+   * Enforces the schemas defined in the Canvas to catch errors locally.
+   */
+  private _validateRequirements(taskType: string, requirements: TaskRequirements) {
+    const schema = REQUIREMENT_SCHEMAS[taskType];
+    if (!schema) return;
+
+    // 1. Required Fields
+    for (const field of schema.required) {
+      if (!(field in requirements)) {
+        throw new InvalidRequestError("PX_302", `Pre-flight Error: Missing required field '${field}' for ${taskType}.`, 400);
+      }
+    }
+
+    // 2. Enum Validation
+    if (schema.enums) {
+      for (const [field, allowedValues] of Object.entries(schema.enums)) {
+        const value = (requirements as any)[field];
+        if (value && !(allowedValues as string[]).includes(value)) {
+          throw new InvalidRequestError("PX_302", `Pre-flight Error: Invalid value for '${field}'. Allowed: ${(allowedValues as string[]).join(', ')}`, 400);
+        }
+      }
+    }
+
+    // 3. Pattern Matching (Regex)
+    if (schema.patterns) {
+      for (const [field, pattern] of Object.entries(schema.patterns)) {
+        const value = (requirements as any)[field];
+        if (value && !(pattern as RegExp).test(value)) {
+          throw new InvalidRequestError("PX_302", `Pre-flight Error: Invalid format for '${field}'.`, 400);
+        }
+      }
+    }
+  }
+
+  public resolveLegalTemplate(countryCode: string): string {
+    return JURISDICTION_TEMPLATES[countryCode.toUpperCase()] || DEFAULT_LEGAL_TEMPLATE;
+  }
+
+  /**
    * Request a Task (The Primary Action)
-   * Broadcasts a new task intent to the Human Proxy network.
-   * * @param taskType - Enum or string defining the job (e.g. 'verify_sms_otp')
-   * @param requirements - Task-specific parameters and context
-   * @param maxBudgetSats - Escrow amount to lock
+   * Now includes automated pre-flight validation.
    */
   public async requestTask(
     taskType: TaskType | string, 
     requirements: TaskRequirements, 
-    maxBudgetSats: number
+    maxBudgetSats: number,
+    options?: { autoLegal?: boolean; countryCode?: string }
   ): Promise<TaskObject> {
+    
+    // 1. Enforce local validation before network broadcast
+    this._validateRequirements(taskType as string, requirements);
+
+    // 2. Auto-suggest legal template if enabled
+    if (options?.autoLegal && options.countryCode) {
+      const templatePath = this.resolveLegalTemplate(options.countryCode);
+      (requirements as any).legal_template = templatePath;
+    }
+
     if (this.isTestMode) {
       return this._simulateTaskCreation(maxBudgetSats);
     }
@@ -122,29 +197,18 @@ export class ProxyClient {
     return res.data;
   }
 
-  /**
-   * Get Task Status
-   * Poll for completion or check current state.
-   */
   public async getTask(taskId: string): Promise<TaskObject> {
-    if (this.isTestMode) {
-      return this._simulateTaskPolling(taskId);
-    }
-
+    if (this.isTestMode) return this._simulateTaskPolling(taskId);
     const res = await this.api.get(`/tasks/${taskId}`);
     return res.data;
   }
 
-  /**
-   * Get Market Ticker
-   * Check real-time pricing and congestion.
-   */
   public async getTicker(): Promise<MarketTicker> {
     if (this.isTestMode) {
       return {
         status: "stable",
         base_currency: "SATS",
-        rates: { [TaskType.VERIFY_SMS_OTP]: 1000, [TaskType.LEGAL_NOTARY_SIGN]: 50000 },
+        rates: { [TaskType.VERIFY_SMS_OTP]: 1000, [TaskType.LEGAL_NOTARY_SIGN]: 45000 },
         congestion_multiplier: 1.0
       };
     }
@@ -157,7 +221,6 @@ export class ProxyClient {
   public enableTestMode(scenario: SimulationScenario = 'HAPPY_PATH') {
     this.isTestMode = true;
     this.activeScenario = scenario;
-    console.warn(`⚠️ [ProxySDK] SIMULATION ACTIVE. Scenario: ${scenario}`);
   }
 
   private _simulateTaskCreation(budget: number): TaskObject {
@@ -169,50 +232,18 @@ export class ProxyClient {
     return {
       id: mockId,
       status: 'matching',
-      created_at: new Date().toISOString(),
-      assigned_node_id: 'node_simulated_human_alpha'
+      created_at: new Date().toISOString()
     };
   }
 
   private _simulateTaskPolling(taskId: string): TaskObject {
-    if (!this.mockTaskStore.has(taskId)) {
-      throw new Error(`Task ${taskId} not found in simulator.`);
-    }
-    const createdAt = this.mockTaskStore.get(taskId) || 0;
-    const elapsed = Date.now() - createdAt;
-    
-    let status: any = 'matching';
-    if (elapsed > 5000) status = 'completed';
-    else if (elapsed > 2000) status = 'in_progress';
-
+    const createdAt = this.mockTaskStore.get(taskId) || Date.now();
     return {
       id: taskId,
-      status: status,
+      status: 'in_progress',
       created_at: new Date(createdAt).toISOString()
     };
   }
-}
-
-// --- 4. Utilities ---
-
-export function verifyProxySignature(
-  rawBody: string,
-  signature: string,
-  timestamp: string,
-  secret: string
-): boolean {
-  const now = Math.floor(Date.now() / 1000);
-  const eventTime = parseInt(timestamp, 10);
-  if (isNaN(eventTime) || Math.abs(now - eventTime) > 300) return false;
-
-  const payload = `${timestamp}.${rawBody}`;
-  const hmac = createHmac('sha256', secret);
-  const digest = hmac.update(payload).digest('hex');
-  const signatureBuffer = Buffer.from(signature);
-  const digestBuffer = Buffer.from(digest);
-
-  if (signatureBuffer.length !== digestBuffer.length) return false;
-  return timingSafeEqual(signatureBuffer, digestBuffer);
 }
 
 export * from './types';
